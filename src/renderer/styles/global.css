@@ -1,0 +1,47 @@
+:root {
+  color-scheme: dark;
+  font-family: "Source Code Pro", monospace;
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: #1e1e1e;
+  color: #e0e0e0;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+}
+
+a {
+  color: #ffa726;
+  text-decoration: none;
+}
+
+a:hover {
+  color: #ff8c42;
+}
+
+button {
+  font-family: inherit;
+}
+
+input {
+  font-family: inherit;
+}
+
+input:focus {
+  outline: none;
+}

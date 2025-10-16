@@ -53,14 +53,16 @@ async function createWindow() {
 }
 
 app.whenReady().then(() => {
+  // Set app name
+  app.setName('Flareon');
+  
   // Set dock icon on macOS
   if (process.platform === 'darwin') {
     const iconPath = path.join(__dirname, isDev ? "../../public/assets/appIcon.png" : "../renderer/assets/appIcon.png");
     let icon = nativeImage.createFromPath(iconPath);
     if (!icon.isEmpty()) {
-      // Resize to match macOS dock icon size with proper aspect ratio
-      // macOS typically uses 512x512 for @2x displays but shows them smaller
-      icon = icon.resize({ width: 512, height: 512, quality: 'best' });
+      // Resize to standard macOS dock icon size (128x128 for better scaling)
+      icon = icon.resize({ width: 128, height: 128, quality: 'best' });
       app.dock.setIcon(icon);
     }
   }

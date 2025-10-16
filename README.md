@@ -7,7 +7,7 @@
 
 A powerful, developer-focused web browser built with Electron and React for comprehensive web auditing and development tools. Perfect for SEO specialists, accessibility auditors, and web developers who need to analyze websites across multiple dimensions.
 
-![Flareon Dev Browser](https://via.placeholder.com/800x400/1E1E1E/FFFFFF?text=Flareon+Dev+Browser+Screenshot)
+![Flareon Dev Browser](https://github.com/Filip-spec/Flareon/blob/main/public/assets/appIcon.png)
 
 ## ✨ Features
 

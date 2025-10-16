@@ -56,6 +56,8 @@ const throttlePresets: NetworkThrottle[] = [
   { id: "4g", label: "4G", downloadThroughput: 4 * 1024 * 1024 / 8, uploadThroughput: 3 * 1024 * 1024 / 8, latency: 170 },
 ];
 
+const debugLog = (message: string) => console.log(`[NetworkPanel Debug]: ${message}`);
+
 export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPanelProps) {
   const [activeTab, setActiveTab] = useState<"requests" | "websockets" | "serviceworker">("requests");
   const [requests, setRequests] = useState<NetworkRequest[]>([]);
@@ -83,6 +85,7 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
       }
       
       analyzeNetwork();
+      setupNetworkMonitoring();
     }
   }, [isOpen]);
 
@@ -97,56 +100,189 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     }
   }, [requests]);
 
-  const analyzeNetwork = async () => {
+  // Ensure setupNetworkMonitoring is defined
+  const setupNetworkMonitoring = async () => {
+    debugLog('Setting up network monitoring');
     const webview = webviewRef.current;
-    if (!webview) return;
+    if (!webview) {
+      debugLog('Webview reference is null');
+      return;
+    }
 
+    webview.addEventListener('dom-ready', async () => {
+      try {
+        await webview.executeJavaScript(`
+          (function() {
+            if (window.__networkMonitorInstalled) return;
+            window.__networkMonitorInstalled = true;
+            
+            // Store original fetch
+            const originalFetch = window.fetch;
+            window.__networkRequests = [];
+            
+            // Override fetch
+            window.fetch = function() {
+              const url = arguments[0];
+              const options = arguments[1] || {};
+              const startTime = Date.now();
+              
+              const requestInfo = {
+                id: Date.now() + '_' + Math.random(),
+                url: typeof url === 'string' ? url : url.url,
+                method: options.method || 'GET',
+                timestamp: startTime
+              };
+              
+              return originalFetch.apply(this, arguments).then(function(response) {
+                const clonedResponse = response.clone();
+                
+                requestInfo.status = response.status;
+                requestInfo.statusText = response.statusText;
+                requestInfo.time = Date.now() - startTime;
+                requestInfo.type = response.headers.get('content-type') || 'unknown';
+                
+                window.__networkRequests.push(requestInfo);
+                
+                return response;
+              }).catch(function(error) {
+                requestInfo.status = 0;
+                requestInfo.statusText = error.message;
+                requestInfo.time = Date.now() - startTime;
+                window.__networkRequests.push(requestInfo);
+                throw error;
+              });
+            };
+            
+            console.log('Network monitoring installed');
+          })();
+        `, false);
+        debugLog('Network monitoring script injected');
+      } catch (err) {
+        debugLog(`Failed to setup network monitoring: ${err}`);
+      }
+    });
+  };
+
+  // Fixing type issues and event listener options
+  const executeInWebView = async (script: string) => {
+    const webview = webviewRef.current;
+    if (!webview) {
+      debugLog('Webview reference is null');
+      return null;
+    }
+
+    return new Promise((resolve, reject) => {
+      webview.addEventListener('dom-ready', async () => {
+        try {
+          const result = await webview.executeJavaScript(script, false);
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      }, true); // Changed event listener options to boolean
+    });
+  };
+
+  // Update analyzeNetwork to use executeInWebView
+  const analyzeNetwork = async () => {
+    debugLog('Analyzing network');
     setLoading(true);
-
     try {
-      // Get Service Workers
-      const swData = await webview.executeJavaScript(`
+      const swData = (await executeInWebView(`
         (async function() {
           try {
-            if ('serviceWorker' in navigator) {
+            if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
               const registrations = await navigator.serviceWorker.getRegistrations();
-              return registrations.map(reg => ({
-                scriptURL: reg.active ? reg.active.scriptURL : 'none',
-                state: reg.active ? reg.active.state : 'none',
-                scope: reg.scope
-              }));
+              return registrations.map(function(reg) {
+                return {
+                  scriptURL: reg.active ? reg.active.scriptURL : 'none',
+                  state: reg.active ? reg.active.state : 'none',
+                  scope: reg.scope
+                };
+              });
             }
             return [];
           } catch (err) {
             return [];
           }
         })();
-      `);
+      `)) as ServiceWorkerInfo[]; // Explicitly cast to expected type
+      debugLog(`Service workers found: ${swData.length}`);
+      setServiceWorkers(swData || []);
 
-      setServiceWorkers(swData);
-
-      // Check WebSocket connections
-      const wsData = await webview.executeJavaScript(`
+      const wsData = (await executeInWebView(`
         (function() {
-          return window.__wsConnections ? window.__wsConnections.length : 0;
+          try {
+            return typeof window !== 'undefined' && window.__wsConnections ? window.__wsConnections.length : 0;
+          } catch (e) {
+            return 0;
+          }
         })();
-      `);
-
+      `)) as number; // Explicitly cast to expected type
+      debugLog(`WebSocket connections: ${wsData}`);
       setWsConnected(wsData > 0);
-
     } catch (err) {
-      console.error('Failed to analyze network', err);
+      debugLog(`Error analyzing network: ${err}`);
     } finally {
       setLoading(false);
     }
   };
 
+  const collectNetworkRequests = async () => {
+    const webview = webviewRef.current;
+    if (!webview) return;
+
+    try {
+      const newRequests = await webview.executeJavaScript(`
+        (function() {
+          try {
+            if (window.__networkRequests && window.__networkRequests.length > 0) {
+              const requests = window.__networkRequests.slice();
+              window.__networkRequests = [];
+              return requests;
+            }
+            return [];
+          } catch (e) {
+            return [];
+          }
+        })();
+      `, false);
+
+      if (newRequests && newRequests.length > 0) {
+        setRequests(prev => {
+          const combined = [...newRequests.map((req: any) => ({
+            ...req,
+            size: 0,
+            blocked: false
+          })), ...prev];
+          return combined.slice(0, 100);
+        });
+      }
+    } catch (err) {
+      console.error('Failed to collect network requests', err);
+    }
+  };
+
+  // Poll for new requests every 2 seconds
+  useEffect(() => {
+    if (isOpen && activeTab === 'requests') {
+      const interval = setInterval(collectNetworkRequests, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [isOpen, activeTab]);
+
   const clearRequests = () => {
+    debugLog('Clear Requests button clicked');
     setRequests([]);
     localStorage.removeItem('flareon-network-history');
   };
 
   const exportHAR = () => {
+    debugLog('Export HAR button clicked');
+    if (requests.length === 0) {
+      debugLog('No requests to export');
+      return;
+    }
     const har = {
       log: {
         version: "1.2",
@@ -196,48 +332,93 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     a.download = `network-${Date.now()}.har`;
     a.click();
     URL.revokeObjectURL(url);
+    debugLog('HAR file exported');
   };
 
   const applyThrottle = async (throttleId: string) => {
+    debugLog(`Applying throttle: ${throttleId}`);
     const preset = throttlePresets.find(p => p.id === throttleId);
-    if (!preset) return;
-
+    if (!preset) {
+      debugLog('Throttle preset not found');
+      return;
+    }
     setThrottle(throttleId);
-
-    // Apply throttling to webview
     const webview = webviewRef.current;
-    if (webview) {
-      try {
-        // Electron's webview doesn't have direct throttling API
-        // We can simulate it by injecting delays into network requests
-        await webview.executeJavaScript(`
-          (function() {
-            const throttle = ${JSON.stringify(preset)};
-            console.log('Network throttling applied:', throttle.label);
+    if (!webview) {
+      debugLog('Webview reference is null');
+      return;
+    }
+    try {
+      const presetJSON = JSON.stringify(preset);
+      const result = await webview.executeJavaScript(`
+        (function() {
+          try {
+            const throttle = ${presetJSON};
+            console.log('Applying throttle:', throttle);
             
             if (throttle.id === 'offline') {
-              // Simulate offline
               window.__offlineMode = true;
+              console.log('Offline mode enabled');
             } else {
               window.__offlineMode = false;
               window.__throttle = throttle;
+              console.log('Throttle settings applied:', throttle);
             }
-          })();
-        `);
-      } catch (err) {
-        console.error('Failed to apply throttle', err);
-      }
+            
+            // Simulate throttling by overriding fetch and XMLHttpRequest
+            if (!window.__throttlingInstalled) {
+              window.__throttlingInstalled = true;
+              const originalFetch = window.fetch;
+              window.fetch = function() {
+                const delay = throttle.latency || 0;
+                return new Promise((resolve, reject) => {
+                  setTimeout(() => {
+                    originalFetch.apply(this, arguments).then(resolve).catch(reject);
+                  }, delay);
+                });
+              };
+
+              const originalXHROpen = XMLHttpRequest.prototype.open;
+              const originalXHRSend = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function() {
+                this.__throttleDelay = throttle.latency || 0;
+                return originalXHROpen.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function() {
+                const self = this;
+                const args = arguments;
+                setTimeout(() => {
+                  originalXHRSend.apply(self, args);
+                }, this.__throttleDelay);
+              };
+              console.log('Throttling logic installed');
+            }
+            return true;
+          } catch (e) {
+            console.error('Throttle error:', e);
+            return false;
+          }
+        })();
+      `, false);
+      debugLog(`Throttle applied: ${result}`);
+    } catch (err) {
+      debugLog(`Error applying throttle: ${err}`);
     }
   };
 
   const addBlockedDomain = () => {
+    debugLog(`Add Blocked Domain button clicked: ${blockInput}`);
     if (blockInput.trim() && !blockedDomains.includes(blockInput.trim())) {
       setBlockedDomains([...blockedDomains, blockInput.trim()]);
       setBlockInput("");
+      debugLog(`Blocked domain added: ${blockInput}`);
+    } else {
+      debugLog('Invalid or duplicate domain');
     }
   };
 
   const removeBlockedDomain = (domain: string) => {
+    debugLog(`Remove Blocked Domain button clicked: ${domain}`);
     setBlockedDomains(blockedDomains.filter(d => d !== domain));
   };
 
@@ -246,32 +427,44 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     if (!webview) return;
 
     try {
-      await webview.executeJavaScript(`
+      const safeUrl = request.url.replace(/'/g, "\\'");
+      const safeBody = request.requestBody ? request.requestBody.replace(/'/g, "\\'").replace(/`/g, "\\`") : '';
+      const headersJSON = JSON.stringify(request.requestHeaders || {});
+      
+      const result = await webview.executeJavaScript(`
         (async function() {
-          const options = {
-            method: '${request.method}',
-            headers: ${JSON.stringify(request.requestHeaders || {})},
-            ${request.requestBody ? `body: '${request.requestBody}'` : ''}
-          };
-          
-          const response = await fetch('${request.url}', options);
-          const text = await response.text();
-          
-          return {
-            status: response.status,
-            statusText: response.statusText,
-            body: text
-          };
+          try {
+            const options = {
+              method: '${request.method}',
+              headers: ${headersJSON}${request.requestBody ? `,\n              body: '${safeBody}'` : ''}
+            };
+            
+            const response = await fetch('${safeUrl}', options);
+            const text = await response.text();
+            
+            return {
+              status: response.status,
+              statusText: response.statusText,
+              body: text.substring(0, 10000) // Limit response size
+            };
+          } catch (err) {
+            return { error: err.message || String(err) };
+          }
         })();
-      `);
+      `, false);
 
-      // Add replayed request to history
-      const newRequest: NetworkRequest = {
-        ...request,
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-      };
-      setRequests(prev => [newRequest, ...prev]);
+      if (result && !result.error) {
+        // Add replayed request to history
+        const newRequest: NetworkRequest = {
+          ...request,
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          status: result.status,
+          statusText: result.statusText,
+          responseBody: result.body,
+        };
+        setRequests(prev => [newRequest, ...prev]);
+      }
     } catch (err) {
       console.error('Failed to replay request', err);
     }
@@ -284,25 +477,33 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     if (!webview) return;
 
     try {
-      await webview.executeJavaScript(`
+      const safeMessage = wsInput.replace(/'/g, "\\'").replace(/`/g, "\\`");
+      const sent = await webview.executeJavaScript(`
         (function() {
-          if (window.__wsConnection && window.__wsConnection.readyState === 1) {
-            window.__wsConnection.send('${wsInput}');
-            return true;
+          try {
+            if (typeof window !== 'undefined' && window.__wsConnection && window.__wsConnection.readyState === 1) {
+              window.__wsConnection.send('${safeMessage}');
+              return true;
+            }
+            return false;
+          } catch (e) {
+            console.error('WebSocket send error:', e);
+            return false;
           }
-          return false;
         })();
-      `);
+      `, false);
 
-      const newMessage: WebSocketMessage = {
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        direction: "sent",
-        data: wsInput,
-        url: "websocket"
-      };
-      setWsMessages(prev => [...prev, newMessage]);
-      setWsInput("");
+      if (sent) {
+        const newMessage: WebSocketMessage = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          direction: "sent",
+          data: wsInput,
+          url: "websocket"
+        };
+        setWsMessages(prev => [...prev, newMessage]);
+        setWsInput("");
+      }
     } catch (err) {
       console.error('Failed to send WebSocket message', err);
     }
@@ -313,18 +514,28 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     if (!webview) return;
 
     try {
-      await webview.executeJavaScript(`
+      const result = await webview.executeJavaScript(`
         (async function() {
-          if ('caches' in window) {
-            const cacheNames = await caches.keys();
-            await Promise.all(cacheNames.map(name => caches.delete(name)));
-            return cacheNames.length;
+          try {
+            if (typeof caches !== 'undefined') {
+              const cacheNames = await caches.keys();
+              await Promise.all(cacheNames.map(function(name) { 
+                return caches.delete(name); 
+              }));
+              return cacheNames.length;
+            }
+            return 0;
+          } catch (err) {
+            return { error: err.message || String(err) };
           }
-          return 0;
         })();
-      `);
+      `, false);
 
-      alert('Service Worker caches cleared!');
+      if (result && !result.error) {
+        alert('Service Worker caches cleared! (' + result + ' cache(s))');
+      } else {
+        alert('No caches found or error occurred');
+      }
       analyzeNetwork();
     } catch (err) {
       console.error('Failed to clear SW cache', err);
@@ -336,18 +547,28 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
     if (!webview) return;
 
     try {
-      await webview.executeJavaScript(`
+      const result = await webview.executeJavaScript(`
         (async function() {
-          if ('serviceWorker' in navigator) {
-            const registrations = await navigator.serviceWorker.getRegistrations();
-            await Promise.all(registrations.map(reg => reg.unregister()));
-            return registrations.length;
+          try {
+            if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+              const registrations = await navigator.serviceWorker.getRegistrations();
+              await Promise.all(registrations.map(function(reg) { 
+                return reg.unregister(); 
+              }));
+              return registrations.length;
+            }
+            return 0;
+          } catch (err) {
+            return { error: err.message || String(err) };
           }
-          return 0;
         })();
-      `);
+      `, false);
 
-      alert('Service Workers unregistered!');
+      if (result && !result.error) {
+        alert('Service Workers unregistered! (' + result + ' worker(s))');
+      } else {
+        alert('No service workers found or error occurred');
+      }
       analyzeNetwork();
     } catch (err) {
       console.error('Failed to unregister SW', err);
@@ -645,6 +866,20 @@ export default function NetworkPanel({ webviewRef, isOpen, onClose }: NetworkPan
             <div>
               <div style={{ fontSize: 12, fontWeight: 600, color: theme.colors.textPrimary, marginBottom: 8 }}>
                 Request History ({requests.length})
+              </div>
+              
+              {/* Info Box */}
+              <div style={{
+                padding: 10,
+                background: "rgba(33, 150, 243, 0.1)",
+                border: "1px solid rgba(33, 150, 243, 0.3)",
+                borderRadius: 6,
+                marginBottom: 12,
+                fontSize: 11,
+                color: theme.colors.textSecondary
+              }}>
+                <div style={{ fontWeight: 600, color: "#2196F3", marginBottom: 4 }}>Network Monitoring Active</div>
+                <div>Capturing fetch() and XMLHttpRequest calls. Requests auto-refresh every 2 seconds.</div>
               </div>
               
               {requests.length === 0 ? (

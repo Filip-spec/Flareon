@@ -1,7 +1,16 @@
 import { contextBridge, ipcRenderer } from "electron";
 
 const api = {
-  captureViewport: (): Promise<string | null> => ipcRenderer.invoke("app:capture-viewport"),
+  captureViewport: (options: { 
+    webContentsId: number; 
+    rect?: { x: number; y: number; width: number; height: number };
+    format?: 'png' | 'jpeg' | 'webp';
+    quality?: number;
+    namePrefix?: string;
+    includeTimestamp?: boolean;
+  }): Promise<string | null> =>
+    ipcRenderer.invoke("app:capture-viewport", options),
+  saveScreenshot: (buffer: Uint8Array): Promise<string | null> => ipcRenderer.invoke("app:save-screenshot", buffer),
   toggleDevTools: (): Promise<void> => ipcRenderer.invoke("app:toggle-devtools"),
   toggleWebviewDevTools: (): Promise<{ success: boolean; message: string }> => 
     ipcRenderer.invoke("app:toggle-webview-devtools"),
@@ -22,3 +31,6 @@ declare global {
     electronAPI: typeof api;
   }
 }
+
+// For CommonJS compatibility
+export {};

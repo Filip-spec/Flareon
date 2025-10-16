@@ -1,10 +1,7 @@
-import { app, BrowserWindow, ipcMain, shell, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, shell, nativeImage, webContents } from "electron";
+import type { Rectangle } from "electron";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import fs from "node:fs/promises";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 let mainWindow: BrowserWindow | null = null;
 const isDev = process.env.NODE_ENV === "development" || !app.isPackaged;
@@ -82,29 +79,72 @@ app.on("activate", () => {
   }
 });
 
-ipcMain.handle("app:capture-viewport", async () => {
-  if (!mainWindow) {
+ipcMain.handle("app:capture-viewport", async (_event, options?: { 
+  webContentsId?: number; 
+  rect?: Rectangle;
+  format?: 'png' | 'jpeg' | 'webp';
+  quality?: number;
+  namePrefix?: string;
+  includeTimestamp?: boolean;
+}) => {
+  try {
+    const targetId = options?.webContentsId;
+    if (!targetId) {
+      throw new Error("Missing webContentsId");
+    }
+
+    const targetContents = webContents.fromId(targetId);
+    if (!targetContents) {
+      throw new Error(`No webContents found for id ${targetId}`);
+    }
+
+    const image = await targetContents.capturePage(options?.rect);
+    
+    // Use settings for format and quality
+    const format = options?.format || 'png';
+    const quality = options?.quality || 90;
+    const namePrefix = options?.namePrefix || 'flareon-screenshot';
+    const includeTimestamp = options?.includeTimestamp !== false;
+    
+    let buffer: Buffer;
+    let extension: string;
+    
+    if (format === 'jpeg') {
+      buffer = image.toJPEG(quality);
+      extension = 'jpg';
+    } else if (format === 'webp') {
+      buffer = image.toJPEG(quality); // Electron doesn't have toWebP, use JPEG as fallback
+      extension = 'jpg';
+    } else {
+      buffer = image.toPNG();
+      extension = 'png';
+    }
+    
+    const timestamp = includeTimestamp 
+      ? `-${new Date().toISOString().replace(/[:.]/g, "-")}`
+      : '';
+    const fileName = `${namePrefix}${timestamp}.${extension}`;
+    const filePath = path.join(app.getPath("pictures"), fileName);
+    await fs.writeFile(filePath, buffer);
+    console.log("Screenshot saved to:", filePath);
+    return filePath;
+  } catch (error) {
+    console.error("Screenshot capture failed:", error);
     return null;
   }
-
-  const image = await mainWindow.webContents.capturePage();
-  const buffer = image.toPNG();
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const fileName = `flareon-screenshot-${timestamp}.png`;
-  const filePath = path.join(app.getPath("pictures"), fileName);
-  await fs.writeFile(filePath, buffer);
-  return filePath;
 });
 
-ipcMain.handle("app:toggle-devtools", () => {
-  if (!mainWindow) {
-    return;
-  }
-
-  if (mainWindow.webContents.isDevToolsOpened()) {
-    mainWindow.webContents.closeDevTools();
-  } else {
-    mainWindow.webContents.openDevTools({ mode: "detach" });
+ipcMain.handle("app:save-screenshot", async (_event, buffer: Uint8Array) => {
+  try {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const fileName = `flareon-screenshot-${timestamp}.png`;
+    const filePath = path.join(app.getPath("pictures"), fileName);
+    await fs.writeFile(filePath, buffer);
+    console.log("Screenshot saved to:", filePath);
+    return filePath;
+  } catch (error) {
+    console.error("Failed to save screenshot:", error);
+    return null;
   }
 });
 

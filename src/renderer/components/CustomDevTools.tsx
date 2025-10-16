@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { theme } from "../styles/theme";
-import { Code, Network, Terminal, X, Database, Activity, Box } from "lucide-react";
+import { Code, Network, Terminal, X, Database, Activity, Box, Type } from "lucide-react";
 
 // Add keyframe animation
 const styleSheet = document.createElement("style");
@@ -48,8 +48,16 @@ interface StorageItem {
   value: string;
 }
 
+interface FontInfo {
+  family: string;
+  weight: string;
+  style: string;
+  size: string;
+  elements: number;
+}
+
 const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
-  const [activeTab, setActiveTab] = useState<'console' | 'elements' | 'pageinfo' | 'network' | 'storage' | 'performance'>('console');
+  const [activeTab, setActiveTab] = useState<'console' | 'elements' | 'pageinfo' | 'network' | 'storage' | 'performance' | 'fonts'>('console');
   const [consoleLogs, setConsoleLogs] = useState<ConsoleMessage[]>([]);
   const [pageInfo, setPageInfo] = useState<any>(null);
   const [htmlTree, setHtmlTree] = useState<string>('');
@@ -58,82 +66,33 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
   const [sessionStorage, setSessionStorage] = useState<StorageItem[]>([]);
   const [performance, setPerformance] = useState<any>(null);
   const [logFilter, setLogFilter] = useState<'all' | 'log' | 'warn' | 'error' | 'info'>('all');
+  const [fonts, setFonts] = useState<FontInfo[]>([]);
 
   useEffect(() => {
     const webview = webviewRef.current;
     if (!webview) return;
 
-    // Inject console interceptor into the page
-    const injectConsoleLogger = () => {
-      webview.executeJavaScript(`
-        (function() {
-          if (window.__consoleInjected) return;
-          window.__consoleInjected = true;
-          
-          const originalConsole = {
-            log: console.log,
-            warn: console.warn,
-            error: console.error,
-            info: console.info,
-            debug: console.debug
-          };
-          
-          ['log', 'warn', 'error', 'info', 'debug'].forEach(level => {
-            console[level] = function(...args) {
-              originalConsole[level].apply(console, args);
-              
-              // Send to DevTools via console-message event
-              const message = args.map(arg => {
-                if (typeof arg === 'object') {
-                  try {
-                    return JSON.stringify(arg, null, 2);
-                  } catch {
-                    return String(arg);
-                  }
-                }
-                return String(arg);
-              }).join(' ');
-              
-              // This will trigger console-message event
-              originalConsole.log('[DEVTOOLS-' + level.toUpperCase() + ']', message);
-            };
-          });
-        })();
-      `).catch((err: any) => console.error('Failed to inject console logger:', err));
-    };
-
     const handleConsoleMessage = (e: any) => {
       const message = e.message || '';
+      const level = String(e.level || 0); // 0=log, 1=warn, 2=error, 3=info
       
-      // Check if it's our injected message
-      let level = 'log';
-      let cleanMessage = message;
-      
-      if (message.includes('[DEVTOOLS-')) {
-        const match = message.match(/\[DEVTOOLS-(LOG|WARN|ERROR|INFO|DEBUG)\]\s*(.*)/);
-        if (match) {
-          level = match[1].toLowerCase();
-          cleanMessage = match[2];
-        }
-      } else {
-        // Regular console message
-        level = e.level?.toString() || 'log';
-        cleanMessage = message;
-      }
+      let levelName = 'log';
+      if (level === '1' || level === 'warning') levelName = 'warn';
+      else if (level === '2' || level === 'error') levelName = 'error';
+      else if (level === '3' || level === 'info') levelName = 'info';
+      else if (level === '4' || level === 'debug') levelName = 'debug';
       
       const msg: ConsoleMessage = {
         id: crypto.randomUUID(),
-        level: level,
-        message: cleanMessage,
+        level: levelName,
+        message: message,
         timestamp: Date.now()
       };
+      
       setConsoleLogs((prev) => [...prev, msg].slice(-500)); // Keep last 500
     };
 
     const handleDidFinishLoad = async () => {
-      // Inject console logger first
-      injectConsoleLogger();
-      
       try {
         // Get comprehensive page data
         const data = await webview.executeJavaScript(`
@@ -229,15 +188,47 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
               }
             } catch (e) {}
 
-            // Performance
-            const perfData = window.performance.timing;
+            // Performance - use modern API with fallbacks
+            const getPerfEntries = (type) => {
+              try {
+                if (window.PerformanceObserver && PerformanceObserver.supportedEntryTypes && PerformanceObserver.supportedEntryTypes.includes(type)) {
+                  const observer = new PerformanceObserver(() => {});
+                  observer.observe({ type, buffered: true });
+                  const records = observer.takeRecords ? observer.takeRecords() : [];
+                  observer.disconnect();
+                  if (records && records.length > 0) {
+                    return records;
+                  }
+                }
+              } catch (err) {
+                // Ignore observer issues
+              }
+
+              return [];
+            };
+
+            let perfData;
+            try {
+              // Try modern Navigation Timing API first
+              const navEntries = getPerfEntries('navigation');
+              if (navEntries && navEntries.length > 0) {
+                perfData = navEntries[0];
+              } else {
+                // Fallback to deprecated timing API if available
+                perfData = window.performance.timing || {};
+              }
+            } catch (e) {
+              // If both fail, use empty object
+              perfData = {};
+            }
+
             const perf = {
-              domContentLoaded: perfData.domContentLoadedEventEnd - perfData.navigationStart,
-              loadComplete: perfData.loadEventEnd - perfData.navigationStart,
-              domInteractive: perfData.domInteractive - perfData.navigationStart,
-              dnsLookup: perfData.domainLookupEnd - perfData.domainLookupStart,
-              tcpConnection: perfData.connectEnd - perfData.connectStart,
-              serverResponse: perfData.responseEnd - perfData.requestStart
+              domContentLoaded: perfData.domContentLoadedEventEnd ? perfData.domContentLoadedEventEnd - (perfData.navigationStart || perfData.fetchStart || 0) : 0,
+              loadComplete: perfData.loadEventEnd ? perfData.loadEventEnd - (perfData.navigationStart || perfData.fetchStart || 0) : 0,
+              domInteractive: perfData.domInteractive ? perfData.domInteractive - (perfData.navigationStart || perfData.fetchStart || 0) : 0,
+              dnsLookup: perfData.domainLookupEnd ? perfData.domainLookupEnd - perfData.domainLookupStart : 0,
+              tcpConnection: perfData.connectEnd ? perfData.connectEnd - perfData.connectStart : 0,
+              serverResponse: perfData.responseEnd ? perfData.responseEnd - perfData.requestStart : 0
             };
 
             return { info, htmlTree, localStorageItems, sessionStorageItems, perf };
@@ -249,6 +240,43 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
         setLocalStorage(data.localStorageItems);
         setSessionStorage(data.sessionStorageItems);
         setPerformance(data.perf);
+        
+        // Get fonts
+        const fontData = await webview.executeJavaScript(`
+          (function() {
+            const fontMap = new Map();
+            const elements = document.querySelectorAll('*');
+            
+            elements.forEach(el => {
+              const style = window.getComputedStyle(el);
+              const family = style.fontFamily;
+              const weight = style.fontWeight;
+              const fontStyle = style.fontStyle;
+              const size = style.fontSize;
+              
+              const key = \`\${family}|\${weight}|\${fontStyle}|\${size}\`;
+              
+              if (fontMap.has(key)) {
+                fontMap.set(key, fontMap.get(key) + 1);
+              } else {
+                fontMap.set(key, 1);
+              }
+            });
+            
+            const fonts = [];
+            fontMap.forEach((count, key) => {
+              const [family, weight, fontStyle, size] = key.split('|');
+              fonts.push({ family, weight, style: fontStyle, size, elements: count });
+            });
+            
+            // Sort by usage
+            fonts.sort((a, b) => b.elements - a.elements);
+            
+            return fonts;
+          })();
+        `);
+        
+        setFonts(fontData);
       } catch (err) {
         console.error('Failed to get page info', err);
       }
@@ -259,11 +287,10 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
       setConsoleLogs([]);
     };
 
+    // Add event listeners
     webview.addEventListener('console-message', handleConsoleMessage);
     webview.addEventListener('did-finish-load', handleDidFinishLoad);
     webview.addEventListener('did-start-loading', handleDidStartNavigation);
-    webview.addEventListener('did-navigate', injectConsoleLogger);
-    webview.addEventListener('did-navigate-in-page', injectConsoleLogger);
 
     // Initial load
     if (webview.src) {
@@ -274,8 +301,6 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
       webview.removeEventListener('console-message', handleConsoleMessage);
       webview.removeEventListener('did-finish-load', handleDidFinishLoad);
       webview.removeEventListener('did-start-loading', handleDidStartNavigation);
-      webview.removeEventListener('did-navigate', injectConsoleLogger);
-      webview.removeEventListener('did-navigate-in-page', injectConsoleLogger);
     };
   }, [webviewRef]);
 
@@ -425,6 +450,13 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
           >
             <Activity size={14} />
             Performance
+          </button>
+          <button
+            style={styles.tab(activeTab === 'fonts')}
+            onClick={() => setActiveTab('fonts')}
+          >
+            <Type size={14} />
+            Fonts
           </button>
         </div>
         <button style={styles.closeBtn} onClick={onClose} title="Close DevTools">
@@ -817,6 +849,102 @@ const CustomDevTools = ({ webviewRef, onClose }: CustomDevToolsProps) => {
                 <div style={styles.infoCard}>
                   <div style={styles.infoLabel}>Server Response</div>
                   <div style={styles.infoValue}>{performance.serverResponse}ms</div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === 'fonts' && (
+          <div>
+            {fonts.length === 0 ? (
+              <div style={{ color: theme.colors.textSecondary, textAlign: 'center', padding: 20 }}>
+                Loading font information...
+              </div>
+            ) : (
+              <div>
+                <div style={{ 
+                  marginBottom: 16, 
+                  padding: 12, 
+                  background: 'rgba(255, 109, 0, 0.1)', 
+                  border: '1px solid rgba(255, 109, 0, 0.3)',
+                  borderRadius: 6
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: theme.colors.textPrimary, marginBottom: 4 }}>
+                    Font Identifier
+                  </div>
+                  <div style={{ fontSize: 11, color: theme.colors.textSecondary }}>
+                    {fonts.length} unique font styles found on this page
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {fonts.map((font, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: 12,
+                        background: 'rgba(255, 255, 255, 0.03)',
+                        border: `1px solid ${theme.colors.border}`,
+                        borderRadius: 6,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                        <div style={{ flex: 1 }}>
+                          <div
+                            style={{
+                              fontSize: 16,
+                              fontWeight: font.weight as any,
+                              fontStyle: font.style,
+                              fontFamily: font.family,
+                              color: theme.colors.textPrimary,
+                              marginBottom: 8,
+                              lineHeight: 1.4
+                            }}
+                          >
+                            The quick brown fox jumps over the lazy dog
+                          </div>
+                          <div style={{ fontSize: 11, color: theme.colors.textSecondary, marginBottom: 4 }}>
+                            <strong style={{ color: theme.colors.accent }}>Family:</strong> {font.family}
+                          </div>
+                          <div style={{ display: 'flex', gap: 16, fontSize: 10, color: theme.colors.textSecondary }}>
+                            <span><strong>Weight:</strong> {font.weight}</span>
+                            <span><strong>Style:</strong> {font.style}</span>
+                            <span><strong>Size:</strong> {font.size}</span>
+                          </div>
+                        </div>
+                        <div
+                          style={{
+                            padding: '4px 8px',
+                            borderRadius: 4,
+                            background: 'rgba(255, 109, 0, 0.2)',
+                            color: theme.colors.accent,
+                            fontSize: 10,
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                            marginLeft: 12
+                          }}
+                        >
+                          {font.elements} elements
+                        </div>
+                      </div>
+                      <div
+                        style={{
+                          padding: 8,
+                          background: 'rgba(0, 0, 0, 0.3)',
+                          borderRadius: 4,
+                          fontSize: 10,
+                          fontFamily: 'monospace',
+                          color: theme.colors.textSecondary,
+                        }}
+                      >
+                        font-family: {font.family};<br/>
+                        font-weight: {font.weight};<br/>
+                        font-style: {font.style};<br/>
+                        font-size: {font.size};
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}

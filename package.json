@@ -1,11 +1,11 @@
 {
-  "name": "flareon-web-browser",
+  "name": "flareon",
   "productName": "Flareon",
   "version": "0.1.0",
-  "description": "Developer-focused web testing browser skeleton built with Electron and React.",
+  "description": "Developer-focused web browser.",
   "private": true,
   "main": "dist/main/index.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite --config vite.renderer.config.ts",
